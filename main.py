@@ -1,14 +1,36 @@
 import re
+import os
+import uuid
+import glob
+import time
 import logging
 from typing import Dict, Any, Optional
 from fastapi import FastAPI, HTTPException, Body, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, HttpUrl
 import yt_dlp
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
+
+# Directory used when we have to actually download + merge separate audio/video
+# streams into a single playable file (needed for platforms like Instagram Reels
+# that serve audio and video as two separate tracks for licensed music).
+DOWNLOAD_DIR = "/tmp/downloads"
+os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+
+
+def cleanup_old_files(max_age_seconds: int = 1800) -> None:
+    """Remove merged files older than max_age_seconds so /tmp doesn't fill up."""
+    now = time.time()
+    for f in glob.glob(os.path.join(DOWNLOAD_DIR, "*")):
+        try:
+            if now - os.path.getmtime(f) > max_age_seconds:
+                os.remove(f)
+        except OSError:
+            pass
 
 app = FastAPI(
     title="Universal Video Downloader API",
@@ -128,6 +150,56 @@ def proxy_download(url: str):
         logger.error(f"Error opening proxy connection: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to open connection to video source: {str(e)}")
 
+@app.get("/api/local-file/{filename}")
+def serve_local_file(filename: str):
+    """Serves a video we merged (audio+video) server-side."""
+    safe_name = os.path.basename(filename)  # prevent path traversal
+    path = os.path.join(DOWNLOAD_DIR, safe_name)
+    if not os.path.exists(path):
+        raise HTTPException(
+            status_code=404,
+            detail="Merged file not found or has expired. Please fetch the video again."
+        )
+    return FileResponse(path, media_type="video/mp4", filename=safe_name)
+
+
+def download_and_merge(url: str, request: Request) -> str:
+    """
+    Used when the platform doesn't provide a single file with both audio and
+    video (common on Instagram Reels with licensed music). Downloads the best
+    video-only and audio-only streams and merges them with ffmpeg, then
+    returns a URL pointing at our own server to fetch the merged file.
+    """
+    cleanup_old_files()
+    file_id = uuid.uuid4().hex
+    outtmpl = os.path.join(DOWNLOAD_DIR, f"{file_id}.%(ext)s")
+
+    merge_opts = {
+        "format": "bestvideo+bestaudio/best",
+        "outtmpl": outtmpl,
+        "merge_output_format": "mp4",
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        "extractor_args": {
+            "youtube": {"player_client": ["android", "ios", "mweb"]}
+        },
+    }
+
+    logger.info(f"No combined audio+video stream available — downloading and merging with ffmpeg for: {url}")
+    with yt_dlp.YoutubeDL(merge_opts) as ydl:
+        ydl.download([url])
+
+    matches = glob.glob(os.path.join(DOWNLOAD_DIR, f"{file_id}.*"))
+    if not matches:
+        raise HTTPException(status_code=500, detail="Failed to merge audio and video streams")
+
+    final_path = matches[0]
+    filename = os.path.basename(final_path)
+    base_url = str(request.base_url).rstrip("/")
+    return f"{base_url}/api/local-file/{filename}"
+
+
 @app.post("/api/fetch-video", response_model=VideoFetchResponse)
 def fetch_video(request: Request, payload: VideoFetchRequest = Body(...)):
     raw_url = payload.url.strip()
@@ -166,34 +238,33 @@ def fetch_video(request: Request, payload: VideoFetchRequest = Body(...)):
                     raise HTTPException(status_code=404, detail="No video entries found at the provided URL")
                 info = entries[0]
 
-            # Direct video URL extraction
-            video_url = info.get("url")
-            
-            # If direct URL is missing, search formats for the best playable video stream
-            if not video_url:
-                formats = info.get("formats", [])
-                # Filter formats with both audio and video
-                progressive_formats = [
-                    f for f in formats 
-                    if f.get("vcodec") != "none" and f.get("acodec") != "none" and f.get("url")
-                ]
-                if progressive_formats:
-                    # Sort by resolution/height descending to get the best quality
-                    progressive_formats.sort(key=lambda x: x.get("height", 0) or 0, reverse=True)
-                    video_url = progressive_formats[0]["url"]
-                elif formats:
-                    # Fallback to the absolute best format URL
-                    formats_with_url = [f for f in formats if f.get("url")]
-                    if formats_with_url:
-                        # Sort by overall quality or resolution
-                        formats_with_url.sort(key=lambda x: (x.get("height", 0) or 0, x.get("tbr", 0) or 0), reverse=True)
-                        video_url = formats_with_url[0]["url"]
+            # Find a format that already has BOTH audio and video muxed together.
+            # We deliberately ignore info.get("url") here, since that can point
+            # to a video-only "best" pick when no muxed option exists.
+            formats = info.get("formats", [])
+            progressive_formats = [
+                f for f in formats
+                if f.get("vcodec") not in (None, "none")
+                and f.get("acodec") not in (None, "none")
+                and f.get("url")
+            ]
+
+            video_url: Optional[str] = None
+            if progressive_formats:
+                # Sort by resolution/height descending to get the best quality that still has audio
+                progressive_formats.sort(key=lambda x: x.get("height", 0) or 0, reverse=True)
+                video_url = progressive_formats[0]["url"]
+            else:
+                # Platform only offers separate audio/video tracks (common for
+                # Instagram Reels with licensed music). Download + merge with ffmpeg.
+                video_url = download_and_merge(url, request)
 
             if not video_url:
                 raise HTTPException(status_code=404, detail="Could not extract a direct video stream URL from this source")
 
-            # Wrap YouTube streams in proxy to bypass client IP lock
-            if "googlevideo.com" in video_url or platform == "YouTube":
+            # Wrap YouTube CDN streams in our proxy to bypass client IP lock.
+            # Skip this for our own merged /api/local-file URLs — those already work directly.
+            if "/api/local-file/" not in video_url and ("googlevideo.com" in video_url or platform == "YouTube"):
                 import urllib.parse
                 base_url = str(request.base_url).rstrip("/")
                 video_url = f"{base_url}/api/download?url={urllib.parse.quote(video_url)}"
