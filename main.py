@@ -29,6 +29,8 @@ class VideoFetchRequest(BaseModel):
     url: str
     po_token: Optional[str] = None
     visitor_data: Optional[str] = None
+    is_audio_only: Optional[bool] = False
+    quality: Optional[str] = None
 
 class VideoFetchResponse(BaseModel):
     url: str
@@ -130,7 +132,7 @@ def proxy_download(url: str):
         logger.error(f"Error opening proxy connection: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to open connection to video source: {str(e)}")
 
-def fetch_via_cobalt_fallback(target_url: str) -> Optional[Dict[str, Any]]:
+def fetch_via_cobalt_fallback(target_url: str, is_audio_only: bool = False, quality: Optional[str] = None) -> Optional[Dict[str, Any]]:
     import urllib.request
     import urllib.error
     import json
@@ -145,9 +147,18 @@ def fetch_via_cobalt_fallback(target_url: str) -> Optional[Dict[str, Any]]:
         "https://api.cobalt.best",
     ]
     
+    cobalt_quality = "1080"
+    if quality == "720p":
+        cobalt_quality = "720"
+    elif quality == "480p":
+        cobalt_quality = "480"
+    elif quality == "360p":
+        cobalt_quality = "360"
+
     payload = {
         "url": target_url,
-        "videoQuality": "1080"
+        "videoQuality": cobalt_quality,
+        "isAudioOnly": is_audio_only
     }
     
     data_bytes = json.dumps(payload).encode("utf-8")
@@ -204,18 +215,45 @@ def fetch_video(request: Request, payload: VideoFetchRequest = Body(...)):
     # Helper for server-side downloading and merging
     def download_and_merge_video(target_url: str, video_platform: str, api_base_url: str) -> Optional[VideoFetchResponse]:
         unique_id = str(uuid.uuid4())
-        filename = f"{unique_id}.mp4"
-        output_path = os.path.join(DOWNLOAD_DIR, filename)
         
-        ydl_opts = {
-            # Bounded quality to 1080p to keep merges fast and reliable on limited CPU
-            "format": "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best",
-            "merge_output_format": "mp4",
-            "outtmpl": os.path.join(DOWNLOAD_DIR, f"{unique_id}.%(ext)s"),
-            "quiet": True,
-            "no_warnings": True,
-            "socket_timeout": 30,
-        }
+        is_audio = payload.is_audio_only
+        target_quality = payload.quality or "Best"
+        
+        max_height = 1080
+        if target_quality == "720p":
+            max_height = 720
+        elif target_quality == "480p":
+            max_height = 480
+        elif target_quality == "360p":
+            max_height = 360
+            
+        if is_audio:
+            filename = f"{unique_id}.mp3"
+            output_path = os.path.join(DOWNLOAD_DIR, filename)
+            ydl_opts = {
+                "format": "bestaudio/best",
+                "outtmpl": os.path.join(DOWNLOAD_DIR, f"{unique_id}.%(ext)s"),
+                "quiet": True,
+                "no_warnings": True,
+                "socket_timeout": 30,
+                "postprocessors": [{
+                    "key": "FFmpegExtractAudio",
+                    "preferredcodec": "mp3",
+                    "preferredquality": "192",
+                }]
+            }
+        else:
+            filename = f"{unique_id}.mp4"
+            output_path = os.path.join(DOWNLOAD_DIR, filename)
+            ydl_opts = {
+                # Bounded quality to target_quality
+                "format": f"bestvideo[height<={max_height}]+bestaudio/best[height<={max_height}]/best[height<={max_height}]/best",
+                "merge_output_format": "mp4",
+                "outtmpl": os.path.join(DOWNLOAD_DIR, f"{unique_id}.%(ext)s"),
+                "quiet": True,
+                "no_warnings": True,
+                "socket_timeout": 30,
+            }
         
         if video_platform == "YouTube":
             ydl_opts["extractor_args"] = {
@@ -291,11 +329,28 @@ def fetch_video(request: Request, payload: VideoFetchRequest = Body(...)):
     po_token = payload.po_token or os.environ.get("PO_TOKEN")
     visitor_data = payload.visitor_data or os.environ.get("VISITOR_DATA")
 
+    # Set ydl_format based on quality and audio constraints
+    is_audio = payload.is_audio_only
+    target_quality = payload.quality or "Best"
+    
+    max_height = 1080
+    if target_quality == "720p":
+        max_height = 720
+    elif target_quality == "480p":
+        max_height = 480
+    elif target_quality == "360p":
+        max_height = 360
+        
+    if is_audio:
+        ydl_format = "bestaudio/best"
+    else:
+        ydl_format = f"best[height<={max_height}][ext=mp4]/best[height<={max_height}]/best"
+
     # Configure multiple yt-dlp options to try sequentially for YouTube
     ydl_configs = [
         # Attempt 1: Modern tvhtml5 client (extremely resilient to bot checks)
         {
-            "format": "best[ext=mp4]/best",
+            "format": ydl_format,
             "noplaylist": True,
             "quiet": True,
             "no_warnings": True,
@@ -308,7 +363,7 @@ def fetch_video(request: Request, payload: VideoFetchRequest = Body(...)):
         },
         # Attempt 2: Combo of ios, tvhtml5, and mweb
         {
-            "format": "best[ext=mp4]/best",
+            "format": ydl_format,
             "noplaylist": True,
             "quiet": True,
             "no_warnings": True,
@@ -321,7 +376,7 @@ def fetch_video(request: Request, payload: VideoFetchRequest = Body(...)):
         },
         # Attempt 3: android and web_embedded
         {
-            "format": "best[ext=mp4]/best",
+            "format": ydl_format,
             "noplaylist": True,
             "quiet": True,
             "no_warnings": True,
@@ -337,7 +392,7 @@ def fetch_video(request: Request, payload: VideoFetchRequest = Body(...)):
     # For non-YouTube platforms, we only need one simple configuration
     if platform != "YouTube":
         ydl_configs = [{
-            "format": "best[ext=mp4]/best",
+            "format": ydl_format,
             "noplaylist": True,
             "quiet": True,
             "no_warnings": True,
@@ -375,19 +430,32 @@ def fetch_video(request: Request, payload: VideoFetchRequest = Body(...)):
                 # If direct URL is missing, search formats for the best playable video stream
                 if not video_url:
                     formats = info.get("formats", [])
-                    # Filter formats with both audio and video
-                    progressive_formats = [
-                        f for f in formats 
-                        if f.get("vcodec") != "none" and f.get("acodec") != "none" and f.get("url")
-                    ]
-                    if progressive_formats:
-                        progressive_formats.sort(key=lambda x: x.get("height", 0) or 0, reverse=True)
-                        video_url = progressive_formats[0]["url"]
-                    elif formats:
-                        # If no progressive format found, but formats are available, this could be separate audio/video!
-                        # Skip direct extraction and fallback to download_and_merge_video
-                        logger.info("No progressive formats found in direct extraction, skipping to server-side merge.")
-                        break
+                    if is_audio:
+                        # Filter audio formats
+                        audio_formats = [
+                            f for f in formats 
+                            if f.get("acodec") != "none" and f.get("vcodec") == "none" and f.get("url")
+                        ]
+                        if audio_formats:
+                            audio_formats.sort(key=lambda x: x.get("abr", 0) or 0, reverse=True)
+                            video_url = audio_formats[0]["url"]
+                    else:
+                        # Filter formats with both audio and video
+                        progressive_formats = [
+                            f for f in formats 
+                            if f.get("vcodec") != "none" and f.get("acodec") != "none" and f.get("url")
+                        ]
+                        if progressive_formats:
+                            matching_formats = [f for f in progressive_formats if (f.get("height", 0) or 0) <= max_height]
+                            if not matching_formats:
+                                matching_formats = progressive_formats
+                            matching_formats.sort(key=lambda x: x.get("height", 0) or 0, reverse=True)
+                            video_url = matching_formats[0]["url"]
+                        elif formats:
+                            # If no progressive format found, but formats are available, this could be separate audio/video!
+                            # Skip direct extraction and fallback to download_and_merge_video
+                            logger.info("No progressive formats found in direct extraction, skipping to server-side merge.")
+                            break
 
                 if not video_url:
                     raise ValueError("Could not extract a direct video stream URL from this source")
@@ -402,7 +470,7 @@ def fetch_video(request: Request, payload: VideoFetchRequest = Body(...)):
                 title = info.get("title", "Social Media Video")
                 thumbnail = info.get("thumbnail") or (info.get("thumbnails")[0].get("url") if info.get("thumbnails") else None)
                 duration = info.get("duration")
-                quality = info.get("format_note") or f"{info.get('height')}p" if info.get("height") else "Best"
+                quality = info.get("format_note") or f"{info.get('height')}p" if info.get("height") else target_quality
 
                 logger.info(f"Successfully extracted: '{title}' on {platform} via yt-dlp config {idx+1}")
                 return VideoFetchResponse(
@@ -425,7 +493,7 @@ def fetch_video(request: Request, payload: VideoFetchRequest = Body(...)):
 
     # Fallback to Cobalt Public API instances
     logger.info("yt-dlp and merging failed. Trying Cobalt Public API instances...")
-    cobalt_res = fetch_via_cobalt_fallback(url)
+    cobalt_res = fetch_via_cobalt_fallback(url, is_audio_only=is_audio, quality=payload.quality)
     if cobalt_res:
         return VideoFetchResponse(
             url=cobalt_res["url"],
