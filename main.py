@@ -27,6 +27,8 @@ app.add_middleware(
 
 class VideoFetchRequest(BaseModel):
     url: str
+    po_token: Optional[str] = None
+    visitor_data: Optional[str] = None
 
 class VideoFetchResponse(BaseModel):
     url: str
@@ -132,23 +134,24 @@ def fetch_via_cobalt_fallback(target_url: str) -> Optional[Dict[str, Any]]:
     import urllib.request
     import urllib.error
     import json
-
-    # List of public, highly reliable, active cobalt instances
+    
+    # List of public, highly resilient, active cobalt instances
+    # Using these ensures that if the server fails, we safely route through free, non-cookie public APIs.
     cobalt_instances = [
+        "https://api.cobalt.liubquanti.click",
+        "https://rue-cobalt.xenon.zone",
+        "https://dog.kittycat.boo",
         "https://api.cobalt.tools",
-        "https://cobalt-api.v8v.org",
-        "https://cobalt.api.ryb.ve",
         "https://api.cobalt.best",
-        "https://cobalt-api.mxt.lol",
     ]
-
+    
     payload = {
         "url": target_url,
         "videoQuality": "1080"
     }
-
+    
     data_bytes = json.dumps(payload).encode("utf-8")
-
+    
     for instance in cobalt_instances:
         for endpoint in [instance, f"{instance}/api/json"]:
             logger.info(f"Attempting fallback to Cobalt instance: {endpoint}")
@@ -167,9 +170,9 @@ def fetch_via_cobalt_fallback(target_url: str) -> Optional[Dict[str, Any]]:
                     resp_data = json.loads(response.read().decode("utf-8"))
                     status = resp_data.get("status")
                     video_url = resp_data.get("url")
-                    title = resp_data.get("text") or "Video Download"
-
-                    if video_url and status in ["redirect", "stream", "success"]:
+                    title = resp_data.get("filename") or resp_data.get("text") or "Video Download"
+                    
+                    if video_url and status in ["redirect", "stream", "success", "tunnel"]:
                         logger.info(f"Successfully fetched video link from Cobalt fallback: {video_url}")
                         return {
                             "url": video_url,
@@ -180,8 +183,11 @@ def fetch_via_cobalt_fallback(target_url: str) -> Optional[Dict[str, Any]]:
                         }
             except Exception as e:
                 logger.warning(f"Cobalt instance {endpoint} failed: {e}")
-
+                
     return None
+
+# No cookies file setup function. All user session cookies have been completely removed 
+# to keep the developer's and users' Google/YouTube accounts 100% secure.
 
 @app.post("/api/fetch-video", response_model=VideoFetchResponse)
 def fetch_video(request: Request, payload: VideoFetchRequest = Body(...)):
@@ -200,7 +206,7 @@ def fetch_video(request: Request, payload: VideoFetchRequest = Body(...)):
         unique_id = str(uuid.uuid4())
         filename = f"{unique_id}.mp4"
         output_path = os.path.join(DOWNLOAD_DIR, filename)
-
+        
         ydl_opts = {
             # Bounded quality to 1080p to keep merges fast and reliable on limited CPU
             "format": "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best",
@@ -209,34 +215,38 @@ def fetch_video(request: Request, payload: VideoFetchRequest = Body(...)):
             "quiet": True,
             "no_warnings": True,
             "socket_timeout": 30,
-            "extractor_args": {
+        }
+        
+        if video_platform == "YouTube":
+            ydl_opts["extractor_args"] = {
                 "youtube": {
-                    "player_client": ["tvhtml5", "ios", "mweb", "web_embedded"]
+                    "player_client": ["ios", "tvhtml5", "mweb"]
                 }
             }
-        }
-
-        cookies_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.txt")
-        if os.path.exists(cookies_path):
-            ydl_opts["cookiefile"] = cookies_path
-            logger.info(f"Using cookies.txt from: {cookies_path} for merging")
-
+            # Access dynamic PO_TOKEN and VISITOR_DATA supplied by payload, falling back to environment
+            po_token = payload.po_token or os.environ.get("PO_TOKEN")
+            visitor_data = payload.visitor_data or os.environ.get("VISITOR_DATA")
+            if po_token and visitor_data:
+                ydl_opts["extractor_args"]["youtube"]["po_token"] = [po_token]
+                ydl_opts["extractor_args"]["youtube"]["visitor_data"] = [visitor_data]
+                logger.info("Using supplied visitor_data and po_token for YouTube video download and merge.")
+            
         try:
             logger.info(f"Downloading and merging video server-side to {output_path}")
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(target_url, download=True)
-
+                
                 if "entries" in info:
                     entries = info["entries"]
                     if not entries:
                         return None
                     info = entries[0]
-
+                    
                 title = info.get("title", "Merged Video")
                 thumbnail = info.get("thumbnail") or (info.get("thumbnails")[0].get("url") if info.get("thumbnails") else None)
                 duration = info.get("duration")
                 quality = info.get("format_note") or f"{info.get('height')}p" if info.get("height") else "1080p (Merged)"
-
+                
                 if os.path.exists(output_path):
                     video_url = f"{api_base_url}/api/local-file/{filename}"
                     logger.info(f"Successfully downloaded and merged to {video_url}")
@@ -264,28 +274,26 @@ def fetch_video(request: Request, payload: VideoFetchRequest = Body(...)):
                             )
         except Exception as e:
             logger.error(f"Failed server-side download and merge: {e}")
-
+            
         return None
 
     raw_url = payload.url.strip()
     if not raw_url:
         raise HTTPException(status_code=400, detail="URL cannot be empty")
-
+        
     url = clean_and_extract_url(raw_url)
     logger.info(f"Cleaned URL: {url}")
-
+    
     platform = detect_platform(url)
     logger.info(f"Detected platform: {platform}")
 
-    # Add cookiefile to configs if cookies.txt exists
-    cookies_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.txt")
-    has_cookies = os.path.exists(cookies_path)
-    if has_cookies:
-        logger.info(f"Found cookies.txt at: {cookies_path}")
+    # Dynamic PO_TOKEN and VISITOR_DATA supplied by payload or environment
+    po_token = payload.po_token or os.environ.get("PO_TOKEN")
+    visitor_data = payload.visitor_data or os.environ.get("VISITOR_DATA")
 
     # Configure multiple yt-dlp options to try sequentially for YouTube
     ydl_configs = [
-        # Attempt 1: Multi-client combo (highly resilient)
+        # Attempt 1: Modern tvhtml5 client (extremely resilient to bot checks)
         {
             "format": "best[ext=mp4]/best",
             "noplaylist": True,
@@ -294,11 +302,11 @@ def fetch_video(request: Request, payload: VideoFetchRequest = Body(...)):
             "skip_download": True,
             "extractor_args": {
                 "youtube": {
-                    "player_client": ["tvhtml5", "ios", "mweb", "web_embedded"]
+                    "player_client": ["tvhtml5"]
                 }
             }
         },
-        # Attempt 2: Android & TV combo
+        # Attempt 2: Combo of ios, tvhtml5, and mweb
         {
             "format": "best[ext=mp4]/best",
             "noplaylist": True,
@@ -307,11 +315,11 @@ def fetch_video(request: Request, payload: VideoFetchRequest = Body(...)):
             "skip_download": True,
             "extractor_args": {
                 "youtube": {
-                    "player_client": ["android", "tvhtml5"]
+                    "player_client": ["ios", "tvhtml5", "mweb"]
                 }
             }
         },
-        # Attempt 3: Web-focused fallback
+        # Attempt 3: android and web_embedded
         {
             "format": "best[ext=mp4]/best",
             "noplaylist": True,
@@ -320,7 +328,7 @@ def fetch_video(request: Request, payload: VideoFetchRequest = Body(...)):
             "skip_download": True,
             "extractor_args": {
                 "youtube": {
-                    "player_client": ["web", "web_embedded"]
+                    "player_client": ["android", "web_embedded"]
                 }
             }
         }
@@ -335,21 +343,25 @@ def fetch_video(request: Request, payload: VideoFetchRequest = Body(...)):
             "no_warnings": True,
             "skip_download": True,
         }]
-
-    if has_cookies:
-        for cfg in ydl_configs:
-            cfg["cookiefile"] = cookies_path
+    else:
+        # Inject dynamic or environment PO_TOKEN/VISITOR_DATA into youtube extractor_args
+        if po_token and visitor_data:
+            logger.info("Injecting supplied PO_TOKEN and VISITOR_DATA into yt-dlp extractor args.")
+            for cfg in ydl_configs:
+                if "extractor_args" in cfg and "youtube" in cfg["extractor_args"]:
+                    cfg["extractor_args"]["youtube"]["po_token"] = [po_token]
+                    cfg["extractor_args"]["youtube"]["visitor_data"] = [visitor_data]
 
     last_error_msg = ""
     base_url = str(request.base_url).rstrip("/")
-
+    
     # Try all yt-dlp configurations
     for idx, config in enumerate(ydl_configs):
         logger.info(f"Trying yt-dlp configuration attempt {idx+1}/{len(ydl_configs)}")
         try:
             with yt_dlp.YoutubeDL(config) as ydl:
                 info = ydl.extract_info(url, download=False)
-
+                
                 # If it's a playlist or multiple entries, pick the first
                 if "entries" in info:
                     entries = info["entries"]
@@ -359,13 +371,13 @@ def fetch_video(request: Request, payload: VideoFetchRequest = Body(...)):
 
                 # Direct video URL extraction
                 video_url = info.get("url")
-
+                
                 # If direct URL is missing, search formats for the best playable video stream
                 if not video_url:
                     formats = info.get("formats", [])
                     # Filter formats with both audio and video
                     progressive_formats = [
-                        f for f in formats
+                        f for f in formats 
                         if f.get("vcodec") != "none" and f.get("acodec") != "none" and f.get("url")
                     ]
                     if progressive_formats:
@@ -423,8 +435,6 @@ def fetch_video(request: Request, payload: VideoFetchRequest = Body(...)):
             platform=platform,
             quality=cobalt_res["quality"]
         )
-    else:
-        last_error_msg = "Cobalt fallback failed or rate-limited"
 
     # Fallback to pytubefix for YouTube if yt-dlp failed completely
     if platform == "YouTube":
