@@ -212,6 +212,13 @@ def fetch_video(request: Request, payload: VideoFetchRequest = Body(...)):
             "socket_timeout": 30,
         }
         
+        if video_platform == "YouTube":
+            ydl_opts["extractor_args"] = {
+                "youtube": {
+                    "player_client": ["ios", "tvhtml5", "mweb"]
+                }
+            }
+        
         cookies_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.txt")
         if os.path.exists(cookies_path):
             ydl_opts["cookiefile"] = cookies_path
