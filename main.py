@@ -344,7 +344,10 @@ def fetch_video(request: Request, payload: VideoFetchRequest = Body(...)):
     if is_audio:
         ydl_format = "bestaudio/best"
     else:
-        ydl_format = f"best[height<={max_height}][ext=mp4]/best[height<={max_height}]/best"
+        if target_quality == "Best" or target_quality == "1080p":
+            ydl_format = "best[ext=mp4]/best"
+        else:
+            ydl_format = f"best[height<={max_height}][ext=mp4]/best[height<={max_height}]/best"
 
     # Configure multiple yt-dlp options to try sequentially for YouTube
     ydl_configs = [
