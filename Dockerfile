@@ -6,10 +6,12 @@ ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-# Install system dependencies (curl to run health checks, ffmpeg for merging high quality video/audio)
+# Install system dependencies (curl to run health checks, ffmpeg for merging high quality video/audio, and nodejs/npm)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ffmpeg \
+    nodejs \
+    npm \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements and install python packages
