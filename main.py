@@ -128,6 +128,62 @@ def proxy_download(url: str):
         logger.error(f"Error opening proxy connection: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to open connection to video source: {str(e)}")
 
+def fetch_via_cobalt_fallback(target_url: str) -> Optional[Dict[str, Any]]:
+    import urllib.request
+    import urllib.error
+    import json
+    
+    # List of public, highly reliable, active cobalt instances
+    cobalt_instances = [
+        "https://cobalt-api.v8v.org",
+        "https://cobalt.api.ryb.ve",
+        "https://api.cobalt.best",
+        "https://cobalt-api.mxt.lol",
+        "https://co.wuk.sh",
+    ]
+    
+    payload = {
+        "url": target_url,
+        "videoQuality": "1080",
+        "filenamePattern": "basic"
+    }
+    
+    data_bytes = json.dumps(payload).encode("utf-8")
+    
+    for instance in cobalt_instances:
+        for endpoint in [instance, f"{instance}/api/json"]:
+            logger.info(f"Attempting fallback to Cobalt instance: {endpoint}")
+            try:
+                req = urllib.request.Request(
+                    endpoint,
+                    data=data_bytes,
+                    headers={
+                        "Accept": "application/json",
+                        "Content-Type": "application/json",
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                    },
+                    method="POST"
+                )
+                with urllib.request.urlopen(req, timeout=12) as response:
+                    resp_data = json.loads(response.read().decode("utf-8"))
+                    status = resp_data.get("status")
+                    video_url = resp_data.get("url")
+                    title = resp_data.get("text") or "Video Download"
+                    
+                    if video_url and status in ["redirect", "stream", "success"]:
+                        logger.info(f"Successfully fetched video link from Cobalt fallback: {video_url}")
+                        return {
+                            "url": video_url,
+                            "title": title,
+                            "thumbnail": None,
+                            "duration": None,
+                            "quality": "Best (Cobalt Fallback)"
+                        }
+            except Exception as e:
+                logger.warning(f"Cobalt instance {endpoint} failed: {e}")
+                
+    return None
+
 @app.post("/api/fetch-video", response_model=VideoFetchResponse)
 def fetch_video(request: Request, payload: VideoFetchRequest = Body(...)):
     import os
@@ -350,6 +406,19 @@ def fetch_video(request: Request, payload: VideoFetchRequest = Body(...)):
     merged_response = download_and_merge_video(url, platform, base_url)
     if merged_response:
         return merged_response
+
+    # Fallback to Cobalt Public API instances
+    logger.info("yt-dlp and merging failed. Trying Cobalt Public API instances...")
+    cobalt_res = fetch_via_cobalt_fallback(url)
+    if cobalt_res:
+        return VideoFetchResponse(
+            url=cobalt_res["url"],
+            title=cobalt_res["title"],
+            thumbnail=cobalt_res["thumbnail"],
+            duration=cobalt_res["duration"],
+            platform=platform,
+            quality=cobalt_res["quality"]
+        )
 
     # Fallback to pytubefix for YouTube if yt-dlp failed completely
     if platform == "YouTube":
