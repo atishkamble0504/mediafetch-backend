@@ -3,3 +3,4 @@ uvicorn>=0.22.0
 pydantic>=2.0
 yt-dlp
 typing-extensions>=4.5.0
+pytubefix
