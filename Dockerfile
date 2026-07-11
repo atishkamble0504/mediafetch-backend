@@ -1,17 +1,26 @@
-FROM python:3.11-slim
+FROM python:3.10-slim
+
+# Prevent Python from writing pyc files to disc and buffering stdout/stderr
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-# ffmpeg is needed by yt-dlp for merging/transcoding some formats
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*
+# Install system dependencies (curl to run health checks, ffmpeg for merging high quality video/audio)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
 
+# Copy requirements and install python packages
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY . .
+# Copy application files
+COPY main.py .
 
-# Cloud Run / Render inject PORT; default to 8080 for local docker run
-ENV PORT=8080
+# Expose the API port
 EXPOSE 8080
 
-CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT}"]
+# Command to run uvicorn (listening on 8080 by default)
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
