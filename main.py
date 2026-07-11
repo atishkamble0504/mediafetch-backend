@@ -155,45 +155,66 @@ def fetch_via_cobalt_fallback(target_url: str, is_audio_only: bool = False, qual
     elif quality == "360p":
         cobalt_quality = "360"
 
-    payload = {
-        "url": target_url,
-        "videoQuality": cobalt_quality,
-        "isAudioOnly": is_audio_only
-    }
-    
-    data_bytes = json.dumps(payload).encode("utf-8")
+    # We will try different payload variations to guarantee 100% compatibility 
+    # with both Cobalt v10 (which uses downloadMode and has strict body schema verification)
+    # and Cobalt v7 (which uses isAudioOnly).
+    payload_variants = []
+    if is_audio_only:
+        # Try Cobalt v10 format first
+        payload_variants.append({
+            "url": target_url,
+            "downloadMode": "audio"
+        })
+        # Fallback to Cobalt v7 format if v10 is not supported
+        payload_variants.append({
+            "url": target_url,
+            "isAudioOnly": True
+        })
+    else:
+        # Standard video
+        # Variation A: Standard v10/v7 video payload
+        payload_variants.append({
+            "url": target_url,
+            "videoQuality": cobalt_quality
+        })
+        # Variation B: Absolute minimal payload (extremely resilient)
+        payload_variants.append({
+            "url": target_url
+        })
     
     for instance in cobalt_instances:
         for endpoint in [instance, f"{instance}/api/json"]:
-            logger.info(f"Attempting fallback to Cobalt instance: {endpoint}")
-            try:
-                req = urllib.request.Request(
-                    endpoint,
-                    data=data_bytes,
-                    headers={
-                        "Accept": "application/json",
-                        "Content-Type": "application/json",
-                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-                    },
-                    method="POST"
-                )
-                with urllib.request.urlopen(req, timeout=12) as response:
-                    resp_data = json.loads(response.read().decode("utf-8"))
-                    status = resp_data.get("status")
-                    video_url = resp_data.get("url")
-                    title = resp_data.get("filename") or resp_data.get("text") or "Video Download"
-                    
-                    if video_url and status in ["redirect", "stream", "success", "tunnel"]:
-                        logger.info(f"Successfully fetched video link from Cobalt fallback: {video_url}")
-                        return {
-                            "url": video_url,
-                            "title": title,
-                            "thumbnail": None,
-                            "duration": None,
-                            "quality": "Best (Cobalt Fallback)"
-                        }
-            except Exception as e:
-                logger.warning(f"Cobalt instance {endpoint} failed: {e}")
+            for payload in payload_variants:
+                logger.info(f"Attempting fallback to Cobalt endpoint: {endpoint} with payload keys {list(payload.keys())}")
+                try:
+                    data_bytes = json.dumps(payload).encode("utf-8")
+                    req = urllib.request.Request(
+                        endpoint,
+                        data=data_bytes,
+                        headers={
+                            "Accept": "application/json",
+                            "Content-Type": "application/json",
+                            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                        },
+                        method="POST"
+                    )
+                    with urllib.request.urlopen(req, timeout=12) as response:
+                        resp_data = json.loads(response.read().decode("utf-8"))
+                        status = resp_data.get("status")
+                        video_url = resp_data.get("url")
+                        title = resp_data.get("filename") or resp_data.get("text") or "Video Download"
+                        
+                        if video_url and status in ["redirect", "stream", "success", "tunnel"]:
+                            logger.info(f"Successfully fetched video link from Cobalt fallback: {video_url}")
+                            return {
+                                "url": video_url,
+                                "title": title,
+                                "thumbnail": None,
+                                "duration": None,
+                                "quality": "Best (Cobalt Fallback)"
+                            }
+                except Exception as e:
+                    logger.warning(f"Cobalt endpoint {endpoint} with payload keys {list(payload.keys())} failed: {e}")
                 
     return None
 
