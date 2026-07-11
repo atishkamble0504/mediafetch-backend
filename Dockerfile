@@ -19,6 +19,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application files
 COPY main.py .
 
+# Always force upgrade yt-dlp to the latest version on every deploy
+RUN pip install --no-cache-dir --upgrade yt-dlp
+
 # Expose the API port
 EXPOSE 8080
 
