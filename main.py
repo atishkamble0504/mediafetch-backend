@@ -98,39 +98,62 @@ def proxy_download(url: str):
     decoded_url = urllib.parse.unquote(url)
     logger.info(f"Proxying download for URL: {decoded_url}")
     
-    req = urllib.request.Request(
-        decoded_url,
-        headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "*/*",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Connection": "keep-alive"
-        }
-    )
+    # Try to obtain Content-Length via a quick HEAD request or lightweight GET
+    headers = {
+        "Accept-Ranges": "bytes"
+    }
+    content_length = None
     
     try:
-        # Open connection once to inspect headers
-        response_obj = urllib.request.urlopen(req, timeout=15)
-        headers = {}
-        content_length = response_obj.info().get("Content-Length")
-        if content_length:
-            headers["Content-Length"] = content_length
-            
-        def stream_video():
-            try:
-                with response_obj as r:
-                    while True:
-                        chunk = r.read(128 * 1024)  # 128 KB
-                        if not chunk:
-                            break
-                        yield chunk
-            except Exception as e:
-                logger.error(f"Error streaming video chunks: {e}")
-                
-        return StreamingResponse(stream_video(), media_type="video/mp4", headers=headers)
+        head_req = urllib.request.Request(
+            decoded_url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            },
+            method="HEAD"
+        )
+        with urllib.request.urlopen(head_req, timeout=5) as resp:
+            content_length = resp.info().get("Content-Length")
     except Exception as e:
-        logger.error(f"Error opening proxy connection: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to open connection to video source: {str(e)}")
+        logger.warning(f"Failed HEAD pre-flight request for Content-Length: {e}")
+        # Try a quick GET with a short timeout as fallback
+        try:
+            get_headers_req = urllib.request.Request(
+                decoded_url,
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                }
+            )
+            with urllib.request.urlopen(get_headers_req, timeout=4) as resp:
+                content_length = resp.info().get("Content-Length")
+        except Exception as e2:
+            logger.warning(f"Failed fallback GET pre-flight request for Content-Length: {e2}")
+
+    if content_length:
+        headers["Content-Length"] = content_length
+        logger.info(f"Detected Content-Length: {content_length} bytes")
+        
+    def stream_video():
+        try:
+            req_stream = urllib.request.Request(
+                decoded_url,
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    "Accept": "*/*",
+                    "Accept-Language": "en-US,en;q=0.9",
+                    "Connection": "keep-alive"
+                }
+            )
+            with urllib.request.urlopen(req_stream, timeout=30) as r:
+                while True:
+                    chunk = r.read(128 * 1024)  # 128 KB chunks
+                    if not chunk:
+                        break
+                    yield chunk
+        except Exception as e:
+            logger.error(f"Error streaming video chunks: {e}")
+            
+    return StreamingResponse(stream_video(), media_type="video/mp4", headers=headers)
 
 def fetch_via_cobalt_fallback(target_url: str, is_audio_only: bool = False, quality: Optional[str] = None) -> Optional[Dict[str, Any]]:
     import urllib.request
@@ -147,8 +170,14 @@ def fetch_via_cobalt_fallback(target_url: str, is_audio_only: bool = False, qual
         "https://api.cobalt.best",
     ]
     
-    cobalt_quality = "1080"
-    if quality == "720p":
+    cobalt_quality = "max"
+    if quality == "2160p":
+        cobalt_quality = "2160"
+    elif quality == "1440p":
+        cobalt_quality = "1440"
+    elif quality == "1080p":
+        cobalt_quality = "1080"
+    elif quality == "720p":
         cobalt_quality = "720"
     elif quality == "480p":
         cobalt_quality = "480"
@@ -240,8 +269,14 @@ def fetch_video(request: Request, payload: VideoFetchRequest = Body(...)):
         is_audio = payload.is_audio_only
         target_quality = payload.quality or "Best"
         
-        max_height = 1080
-        if target_quality == "720p":
+        max_height = 4320
+        if target_quality == "2160p":
+            max_height = 2160
+        elif target_quality == "1440p":
+            max_height = 1440
+        elif target_quality == "1080p":
+            max_height = 1080
+        elif target_quality == "720p":
             max_height = 720
         elif target_quality == "480p":
             max_height = 480
@@ -354,8 +389,14 @@ def fetch_video(request: Request, payload: VideoFetchRequest = Body(...)):
     is_audio = payload.is_audio_only
     target_quality = payload.quality or "Best"
     
-    max_height = 1080
-    if target_quality == "720p":
+    max_height = 4320
+    if target_quality == "2160p":
+        max_height = 2160
+    elif target_quality == "1440p":
+        max_height = 1440
+    elif target_quality == "1080p":
+        max_height = 1080
+    elif target_quality == "720p":
         max_height = 720
     elif target_quality == "480p":
         max_height = 480
@@ -365,10 +406,10 @@ def fetch_video(request: Request, payload: VideoFetchRequest = Body(...)):
     if is_audio:
         ydl_format = "bestaudio/best"
     else:
-        if target_quality == "Best" or target_quality == "1080p":
-            ydl_format = "best[ext=mp4]/best"
+        if target_quality == "Best":
+            ydl_format = "bestvideo+bestaudio/best"
         else:
-            ydl_format = f"best[height<={max_height}][ext=mp4]/best[height<={max_height}]/best"
+            ydl_format = f"bestvideo[height<={max_height}]+bestaudio/best[height<={max_height}]/best[height<={max_height}]/best"
 
     # Configure multiple yt-dlp options to try sequentially for YouTube
     ydl_configs = [
@@ -466,20 +507,30 @@ def fetch_video(request: Request, payload: VideoFetchRequest = Body(...)):
                     else:
                         # Filter formats with both audio and video
                         progressive_formats = [
-                            f for f in formats 
-                            if f.get("vcodec") != "none" and f.get("acodec") != "none" and f.get("url")
+                            f_item for f_item in formats 
+                            if f_item.get("vcodec") != "none" and f_item.get("acodec") != "none" and f_item.get("url")
                         ]
-                        if progressive_formats:
-                            matching_formats = [f for f in progressive_formats if (f.get("height", 0) or 0) <= max_height]
-                            if not matching_formats:
-                                matching_formats = progressive_formats
-                            matching_formats.sort(key=lambda x: x.get("height", 0) or 0, reverse=True)
-                            video_url = matching_formats[0]["url"]
-                        elif formats:
-                            # If no progressive format found, but formats are available, this could be separate audio/video!
-                            # Skip direct extraction and fallback to download_and_merge_video
-                            logger.info("No progressive formats found in direct extraction, skipping to server-side merge.")
-                            break
+                        
+                        video_max_height = info.get("height") or 0
+                        target_height = video_max_height if target_quality == "Best" else min(max_height, video_max_height)
+                        
+                        # YouTube separate/split streams are required for resolutions > 720p.
+                        # If target resolution is > 720p, skip progressive formats to force high quality server-side merge!
+                        if target_height > 720 and platform == "YouTube":
+                            logger.info(f"Target quality {target_height}p exceeds 720p. Forcing server-side download and merge for high quality YouTube format.")
+                            video_url = None
+                        else:
+                            if progressive_formats:
+                                matching_formats = [f_item for f_item in progressive_formats if (f_item.get("height", 0) or 0) <= max_height]
+                                if not matching_formats:
+                                    matching_formats = progressive_formats
+                                matching_formats.sort(key=lambda x: x.get("height", 0) or 0, reverse=True)
+                                video_url = matching_formats[0]["url"]
+                            elif formats:
+                                # If no progressive format found, but formats are available, this could be separate audio/video!
+                                # Skip direct extraction and fallback to download_and_merge_video
+                                logger.info("No progressive formats found in direct extraction, skipping to server-side merge.")
+                                break
 
                 if not video_url:
                     raise ValueError("Could not extract a direct video stream URL from this source")
@@ -519,8 +570,14 @@ def fetch_video(request: Request, payload: VideoFetchRequest = Body(...)):
     logger.info("yt-dlp and merging failed. Trying Cobalt Public API instances...")
     cobalt_res = fetch_via_cobalt_fallback(url, is_audio_only=is_audio, quality=payload.quality)
     if cobalt_res:
+        video_url = cobalt_res["url"]
+        if "googlevideo.com" in video_url or platform == "YouTube":
+            import urllib.parse
+            video_url = f"{base_url}/api/download?url={urllib.parse.quote(video_url)}"
+            logger.info(f"Wrapped Cobalt YouTube video URL in streaming proxy: {video_url}")
+            
         return VideoFetchResponse(
-            url=cobalt_res["url"],
+            url=video_url,
             title=cobalt_res["title"],
             thumbnail=cobalt_res["thumbnail"],
             duration=cobalt_res["duration"],
