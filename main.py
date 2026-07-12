@@ -339,7 +339,18 @@ def fetch_video(request: Request, payload: VideoFetchRequest = Body(...)):
                 title = info.get("title", "Merged Video")
                 thumbnail = info.get("thumbnail") or (info.get("thumbnails")[0].get("url") if info.get("thumbnails") else None)
                 duration = info.get("duration")
-                quality = info.get("format_note") or f"{info.get('height')}p" if info.get("height") else "1080p (Merged)"
+                
+                if is_audio:
+                    quality = "Audio"
+                else:
+                    formats = info.get("formats", [])
+                    heights = [
+                        f_item.get("height") 
+                        for f_item in formats 
+                        if f_item.get("height") is not None and f_item.get("vcodec") != "none"
+                    ]
+                    max_height_found = max(heights) if heights else (info.get("height") or 1080)
+                    quality = f"{max_height_found}p"
                 
                 if os.path.exists(output_path):
                     video_url = f"{api_base_url}/api/local-file/{filename}"
@@ -545,7 +556,18 @@ def fetch_video(request: Request, payload: VideoFetchRequest = Body(...)):
                 title = info.get("title", "Social Media Video")
                 thumbnail = info.get("thumbnail") or (info.get("thumbnails")[0].get("url") if info.get("thumbnails") else None)
                 duration = info.get("duration")
-                quality = info.get("format_note") or f"{info.get('height')}p" if info.get("height") else target_quality
+                
+                if is_audio:
+                    quality = "Audio"
+                else:
+                    formats = info.get("formats", [])
+                    heights = [
+                        f_item.get("height") 
+                        for f_item in formats 
+                        if f_item.get("height") is not None and f_item.get("vcodec") != "none"
+                    ]
+                    max_height_found = max(heights) if heights else (info.get("height") or 1080)
+                    quality = f"{max_height_found}p"
 
                 logger.info(f"Successfully extracted: '{title}' on {platform} via yt-dlp config {idx+1}")
                 return VideoFetchResponse(
