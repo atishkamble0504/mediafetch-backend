@@ -171,18 +171,15 @@ def fetch_via_cobalt_fallback(target_url: str, is_audio_only: bool = False, qual
     ]
     
     cobalt_quality = "max"
-    if quality == "2160p":
-        cobalt_quality = "2160"
-    elif quality == "1440p":
-        cobalt_quality = "1440"
-    elif quality == "1080p":
-        cobalt_quality = "1080"
-    elif quality == "720p":
-        cobalt_quality = "720"
-    elif quality == "480p":
-        cobalt_quality = "480"
-    elif quality == "360p":
-        cobalt_quality = "360"
+    if quality:
+        import re
+        match_digits = re.search(r'\d+', quality)
+        if match_digits:
+            cleaned_q = match_digits.group(0)
+            if cleaned_q in ["2160", "1440", "1080", "720", "480", "360", "144"]:
+                cobalt_quality = cleaned_q
+        elif "max" in quality.lower() or "best" in quality.lower():
+            cobalt_quality = "max"
 
     # We will try different payload variations to guarantee 100% compatibility 
     # with both Cobalt v10 (which uses downloadMode and has strict body schema verification)
@@ -235,12 +232,28 @@ def fetch_via_cobalt_fallback(target_url: str, is_audio_only: bool = False, qual
                         
                         if video_url and status in ["redirect", "stream", "success", "tunnel"]:
                             logger.info(f"Successfully fetched video link from Cobalt fallback: {video_url}")
+                            
+                            # Parse actual quality from the returned title/filename if present
+                            parsed_quality = None
+                            if title:
+                                match_res = re.search(r'\b(2160|1440|1080|720|480|360)p\b', title, re.IGNORECASE)
+                                if match_res:
+                                    parsed_quality = f"{match_res.group(1)}p"
+                            
+                            # Determine correct quality label to send back
+                            quality_label = parsed_quality or (quality if quality and "best" not in quality.lower() else None)
+                            if not quality_label:
+                                if cobalt_quality != "max":
+                                    quality_label = f"{cobalt_quality}p"
+                                else:
+                                    quality_label = "1080p" # safe standard fallback label for Best
+                                    
                             return {
                                 "url": video_url,
                                 "title": title,
                                 "thumbnail": None,
                                 "duration": None,
-                                "quality": "Best (Cobalt Fallback)"
+                                "quality": f"{quality_label} (Cobalt Fallback)"
                             }
                 except Exception as e:
                     logger.warning(f"Cobalt endpoint {endpoint} with payload keys {list(payload.keys())} failed: {e}")
@@ -399,6 +412,29 @@ def fetch_video(request: Request, payload: VideoFetchRequest = Body(...)):
     # Set ydl_format based on quality and audio constraints
     is_audio = payload.is_audio_only
     target_quality = payload.quality or "Best"
+
+    # Attempt to detect actual YouTube video resolutions via pytubefix pre-fetch
+    if platform == "YouTube" and not is_audio and target_quality == "Best":
+        for cl in ["TV", "IOS", "WEB"]:
+            try:
+                logger.info(f"Pre-fetching YouTube video metadata via pytubefix with client {cl}...")
+                from pytubefix import YouTube as PytubeVideo
+                try:
+                    yt = PytubeVideo(url, client=cl)
+                except TypeError:
+                    yt = PytubeVideo(url)
+                video_streams = yt.streams.filter(only_video=True)
+                resolutions = [s.resolution for s in video_streams if s.resolution]
+                if resolutions:
+                    def res_to_int(r):
+                        return int(r.replace('p', '')) if r and r.replace('p', '').isdigit() else 0
+                    resolutions.sort(key=res_to_int, reverse=True)
+                    detected_max_quality = resolutions[0]
+                    logger.info(f"Successfully pre-fetched maximum resolution: {detected_max_quality}")
+                    target_quality = detected_max_quality
+                    break
+            except Exception as e:
+                logger.warning(f"pytubefix metadata detection client {cl} failed: {e}")
     
     max_height = 4320
     if target_quality == "2160p":
@@ -590,7 +626,7 @@ def fetch_video(request: Request, payload: VideoFetchRequest = Body(...)):
 
     # Fallback to Cobalt Public API instances
     logger.info("yt-dlp and merging failed. Trying Cobalt Public API instances...")
-    cobalt_res = fetch_via_cobalt_fallback(url, is_audio_only=is_audio, quality=payload.quality)
+    cobalt_res = fetch_via_cobalt_fallback(url, is_audio_only=is_audio, quality=target_quality)
     if cobalt_res:
         video_url = cobalt_res["url"]
         if "googlevideo.com" in video_url or platform == "YouTube":
