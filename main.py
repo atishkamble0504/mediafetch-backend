@@ -198,7 +198,13 @@ def fetch_via_cobalt_fallback(target_url: str, is_audio_only: bool = False, qual
         })
     else:
         # Standard video
-        # Variation A: Standard v10/v7 video payload
+        # Variation A1: Standard v10/v7 video payload with high-res VP9 codec (enables >1080p like 1440p/2160p)
+        payload_variants.append({
+            "url": target_url,
+            "videoQuality": cobalt_quality,
+            "youtubeVideoCodec": "vp9"
+        })
+        # Variation A2: Standard v10/v7 video payload (fallback codec)
         payload_variants.append({
             "url": target_url,
             "videoQuality": cobalt_quality
